@@ -1,0 +1,53 @@
+{
+  "name": "MMA robot",
+  "servo": {
+    "model": "Parallax 900-00005, digital v3.0",
+    "source": "https://mm.digikey.com/Volume0/opasdata/d220001/medias/docus/5728/900-00005_Guide.pdf",
+    "length_mm": 55.8,
+    "width_mm": 20.3,
+    "height_mm": 40.6,
+    "shaft_offset_mm": 14.0,
+    "mass_g": 42.0,
+    "rated_torque_nm": 0.26834,
+    "torque_limit_nm": 0.16,
+    "speed_deg_s": 315.79,
+    "notes": "Full nominal envelope including mounting flanges, excluding horn. Width uses 0.8 inches conservatively; guide metric width is inconsistent. Shaft offset is a layout assumption: measure your unit before manufacturing. Torque limit is an exploratory derating, not a continuous rating."
+  },
+  "body": {
+    "length_mm": 136.0,
+    "width_mm": 108.0,
+    "plate_mm": 3.0,
+    "clearance_mm": 1.0,
+    "mass_g": 45.0,
+    "payload_mass_g": 100.0,
+    "payload_size_mm": [70.0, 40.0, 22.0]
+  },
+  "leg": {
+    "hip_x_mm": 48.0,
+    "hip_y_mm": 36.0,
+    "reach_mm": 45.0,
+    "lift_height_mm": 26.0,
+    "length_mm": 90.0,
+    "foot_radius_mm": 8.0,
+    "stance_deg": 60.0,
+    "yaw_limit_deg": 25.0,
+    "lift_min_deg": 25.0,
+    "lift_max_deg": 85.0,
+    "bracket_mass_g": 8.0,
+    "shin_mass_g": 8.0,
+    "foot_mass_g": 3.0
+  },
+  "gait": {
+    "period_s": 3.2,
+    "duty_factor": 0.8,
+    "sweep_deg": 9.0,
+    "lift_deg": 20.0,
+    "ramp_s": 2.0
+  },
+  "simulation": {
+    "timestep_s": 0.002,
+    "kp": 3.0,
+    "kd": 0.08,
+    "friction": 0.9
+  }
+}

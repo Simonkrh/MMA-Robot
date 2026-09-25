@@ -1,0 +1,5 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+  "files.exclude": {"**/__pycache__": true},
+  "python.terminal.activateEnvironment": true
+}
