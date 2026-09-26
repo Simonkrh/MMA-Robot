@@ -5,13 +5,76 @@ import argparse
 import json
 import math
 from pathlib import Path
+import re
 import shutil
+import struct
 import subprocess
 import xml.etree.ElementTree as ET
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 CONFIG = ROOT / "robot.json"
 LEGS = (("FL", 1, 1), ("FR", 1, -1), ("RL", -1, 1), ("RR", -1, -1))
+CAD_PARTS = ("deck", "carrier", "leg", "foot")
+CAD_DIR = ROOT / "cad"
+
+
+def read_stl(path):
+    """Read ASCII or binary STL triangles in the source file's units."""
+    path = Path(path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Missing CAD mesh: {path}. Restore it or export with build_robot.py --stl.")
+    data = path.read_bytes()
+    count = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else 0
+    if count and len(data) == 84 + 50 * count:
+        triangles = np.array([struct.unpack_from("<12fH", data, 84 + 50 * i)[3:12]
+                              for i in range(count)], dtype=float).reshape(-1, 3, 3)
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+            rows = re.findall(r"^\s*vertex\s+([^\r\n]+)", text, flags=re.MULTILINE)
+            triangles = np.array([[float(v) for v in row.split()] for row in rows], dtype=float).reshape(-1, 3, 3)
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ValueError(f"Invalid STL mesh: {path}") from exc
+    if not triangles.size or not np.isfinite(triangles).all():
+        raise ValueError(f"Empty or non-finite STL mesh: {path}")
+    area = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
+    if np.any(area <= 1e-12):
+        raise ValueError(f"STL contains zero-area triangles: {path}")
+    return triangles
+
+
+def binary_stl(triangles):
+    """Encode triangles for MuJoCo without changing their coordinates or units."""
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    normals /= np.linalg.norm(normals, axis=1)[:, None]
+    records = [struct.pack("<12fH", *normal, *triangle.ravel(), 0)
+               for normal, triangle in zip(normals, triangles)]
+    return b"MMA robot simulation mesh".ljust(80, b"\0") + struct.pack("<I", len(triangles)) + b"".join(records)
+
+
+def mesh_assets(cfg, cad_dir=CAD_DIR):
+    """Undo print-bed transforms; return assembly-local, millimetre binary meshes.
+
+    Source STLs are never modified. Assets are freshly read on each invocation.
+    These inverses match the per-part export transforms at the end of robot.scad.
+    """
+    assets = {}
+    for part in CAD_PARTS:
+        triangles = read_stl(Path(cad_dir) / f"{part}.stl")
+        if part == "deck":
+            triangles[:, :, 2] -= cfg["body"]["plate_mm"]
+        elif part == "carrier":
+            triangles[:, :, 2] += 2
+        elif part == "leg":
+            print_y = triangles[:, :, 1].copy()
+            triangles[:, :, 1] = triangles[:, :, 2] + 2
+            triangles[:, :, 2] = -print_y
+        elif part == "foot":
+            triangles[:, :, 2] -= cfg["leg"]["foot_radius_mm"]
+        assets[f"meshes/{part}.stl"] = binary_stl(triangles)
+    return assets
 
 
 def load_config(path=CONFIG):
@@ -82,7 +145,7 @@ def add(parent, tag, **attrs):
                                     for k, v in attrs.items()})
 
 
-def model_xml(cfg):
+def model_xml(cfg, *, cad_visuals=True):
     s, b, l, sim = (cfg[k] for k in ("servo", "body", "leg", "simulation"))
     sl, sw, sh = (s[k] / 1000 for k in ("length_mm", "width_mm", "height_mm"))
     offset = s["shaft_offset_mm"] / 1000
@@ -100,6 +163,9 @@ def model_xml(cfg):
     add(default, "geom", friction=[sim["friction"], 0.01, 0.001], condim=3,
         solref="0.006 1", solimp="0.95 0.99 0.001")
     asset = add(root, "asset")
+    if cad_visuals:
+        for part in CAD_PARTS:
+            add(asset, "mesh", name=f"{part}_mesh", file=f"meshes/{part}.stl", scale="0.001 0.001 0.001")
     add(asset, "texture", name="grid", type="2d", builtin="checker", rgb1="0.15 0.19 0.23", rgb2="0.19 0.23 0.27", width=512, height=512)
     add(asset, "material", name="floor", texture="grid", texrepeat="16 16", reflectance="0.05")
     world = add(root, "worldbody")
@@ -147,24 +213,45 @@ def model_xml(cfg):
     for _ in LEGS:
         qpos += [0, math.radians(l["stance_deg"])]
     add(keyframe, "key", name="stand", qpos=qpos)
+    if cad_visuals:
+        attach_cad_visuals(root, cfg)
     ET.indent(root)
     return ET.tostring(root, encoding="unicode") + "\n"
 
 
-def build(cfg=None, output=ROOT / "models" / "robot.xml"):
+def attach_cad_visuals(root, cfg):
+    """Visuals follow existing rigid bodies; hidden proxies still own all physics."""
+    def attach(body_name, part, name, proxies, color, pos=(0, 0, 0)):
+        body = root.find(f".//body[@name='{body_name}']")
+        for proxy in proxies:
+            body.find(f"geom[@name='{proxy}']").set("group", "3")
+        add(body, "geom", name=name, type="mesh", mesh=f"{part}_mesh", pos=pos,
+            mass=0, contype=0, conaffinity=0, group=2, rgba=color)
+
+    attach("chassis", "deck", "deck_visual", ["deck"], "0.04 0.63 0.65 1")
+    for name, _, _ in LEGS:
+        attach(f"{name}_hip", "carrier", f"{name}_carrier_visual",
+               [f"{name}_{part}" for part in ("riser", "bracket", "cradle", "cradle_wall")], "0.04 0.63 0.65 1")
+        attach(f"{name}_leg", "leg", f"{name}_leg_visual", [f"{name}_shin"], "0.93 0.68 0.25 1")
+        attach(f"{name}_leg", "foot", f"{name}_foot_visual", [f"{name}_foot"], "0.12 0.14 0.17 1",
+               pos=(cfg["leg"]["length_mm"] / 1000, .004, 0))
+
+
+def build(cfg=None, output=ROOT / "models" / "robot.xml", cad_dir=CAD_DIR):
     cfg = load_config() if cfg is None else cfg
+    assets = mesh_assets(cfg, cad_dir)
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    for filename, data in assets.items():
+        destination = output.parent / filename
+        destination.parent.mkdir(exist_ok=True)
+        destination.write_bytes(data)
     output.write_text(model_xml(cfg), encoding="utf-8")
     return output
 
 
-def cad_source(cfg):
-    """Editable prototype parts in millimetres, driven by the same JSON as physics.
-
-    Case envelopes are deliberately conservative. Horn slots and strap mounts avoid
-    pretending the manufacturer's overview dimensions define a mounting drawing.
-    """
+def export_cad(cfg, output=CAD_DIR / "parameters.scad"):
+    """Refresh shared dimensions only; robot.scad is a user-editable source file."""
     s, b, l = (cfg[k] for k in ("servo", "body", "leg"))
     parameters = {
         "sl": s["length_mm"], "sw": s["width_mm"], "sh": s["height_mm"],
@@ -173,110 +260,11 @@ def cad_source(cfg):
         "reach": l["reach_mm"], "rise": l["lift_height_mm"], "leg_length": l["length_mm"],
         "stance": l["stance_deg"], "foot_radius": l["foot_radius_mm"],
     }
-    header = "// Generated by build_robot.py from robot.json. Units: mm.\n"
-    header += "// Prototype: measure shaft position, horn and fasteners before printing.\n"
-    header += "\n".join(f"{k} = {v};" for k, v in parameters.items()) + "\n"
-    return header + r'''
-// Select assembly, deck, carrier, leg, or foot; assembly includes servo envelopes.
-part = "assembly";
-$fn = 48;
-
-module slot(length, width, height) {
-    hull() for (x = [-1, 1]) translate([x*(length-width)/2, 0, 0])
-        cylinder(d=width, h=height, center=true);
-}
-module rounded_plate(length, width, height, radius=5) {
-    hull() for (x=[-1,1], y=[-1,1])
-        translate([x*(length/2-radius), y*(width/2-radius), 0])
-            cylinder(r=radius, h=height, center=true);
-}
-module deck() {
-    difference() {
-        translate([0,0,-plate/2]) rounded_plate(bl,bw,plate);
-        for (front=[-1,1], side=[-1,1]) {
-            // Shaft/horn access hole. Hip servo is strapped against deck underside.
-            translate([front*hx,side*hy,-plate/2]) cylinder(d=18,h=plate+2,center=true);
-            for (x=[-1,1], y=[-1,1])
-                translate([front*(hx-shaft_offset)+x*sl/4,
-                           side*hy+y*(sw/2+3),-plate/2])
-                    slot(6,2.5,plate+2);
-        }
-        // Battery straps and controller cable access.
-        for (x=[-24,24], y=[-22,22]) translate([x,y,-plate/2]) slot(12,3,plate+2);
-        translate([0,0,-plate/2]) slot(20,8,plate+2);
-    }
-}
-module carrier() {
-    tray_x = reach-shaft_offset;
-    tray_y = -sh/2-6;
-    bottom = rise-sw/2-3;
-    difference() {
-        union() {
-            translate([0,0,3.5]) cylinder(r=10,h=3,center=true);
-            translate([0,0,(rise+4)/2]) cylinder(r=6,h=rise-4,center=true);
-            translate([reach/2,-5,rise]) cube([reach+18,6,6],center=true);
-            translate([tray_x,tray_y,bottom+1.5]) cube([sl+4,sh+4,3],center=true);
-            // Front wall joins cradle, horn bridge, and base; rear wall retains servo.
-            for (y=[-4.5,-sh-7.5]) translate([tray_x,y,rise-1.5])
-                cube([sl+4,3,sw+3],center=true);
-        }
-        // Horn centre access and two adjustable attachment slots.
-        translate([0,0,rise/2]) cylinder(d=3.2,h=rise+12,center=true);
-        for (x=[-7,7]) translate([x,0,3.5]) slot(5,2.6,5);
-        // Clearance around horizontal lift shaft.
-        translate([reach,-4.5,rise]) rotate([90,0,0]) cylinder(d=14,h=14,center=true);
-        // Two strap passages through the carrier floor.
-        for (x=[-sl/4,sl/4]) translate([tray_x+x,tray_y,bottom+1.5])
-            cube([3,sh-4,5],center=true);
-    }
-}
-module leg() {
-    difference() {
-        hull() for (x=[0,leg_length]) translate([x,4,0])
-            rotate([90,0,0]) cylinder(r=x==0 ? 10 : 5,h=4,center=true);
-        translate([0,4,0]) rotate([90,0,0]) cylinder(d=3.2,h=6,center=true);
-        for (x=[-7,7]) translate([x,4,0]) rotate([90,0,0]) slot(5,2.6,6);
-        translate([leg_length,4,0]) rotate([90,0,0]) cylinder(d=3.2,h=6,center=true);
-    }
-}
-module foot() {
-    // Flexible-material cap; slit fits the flat leg tip. Fit must be tested.
-    difference() {
-        sphere(r=foot_radius);
-        translate([-1.5,0,0]) cube([2*foot_radius-1,4.4,10.4],center=true);
-        rotate([90,0,0]) cylinder(d=3.2,h=2*foot_radius+2,center=true);
-    }
-}
-module assembly() {
-    color([0.04,0.63,0.65]) deck();
-    for (front=[-1,1], side=[-1,1]) {
-        color([0.13,0.15,0.18])
-            translate([front*(hx-shaft_offset),side*hy,-plate-sh/2])
-                cube([sl,sw,sh],center=true);
-        translate([front*hx,side*hy,0]) rotate([0,0,atan2(side,front)]) {
-            color([0.04,0.63,0.65]) carrier();
-            color([0.13,0.15,0.18]) translate([reach-shaft_offset,-sh/2-6,rise])
-                cube([sl,sh,sw],center=true);
-            translate([reach,0,rise]) rotate([0,stance,0]) {
-                color([0.93,0.68,0.25]) leg();
-                color([0.12,0.14,0.17]) translate([leg_length,4,0]) foot();
-            }
-        }
-    }
-}
-if (part=="assembly") assembly();
-else if (part=="deck") translate([0,0,plate]) deck();
-else if (part=="carrier") translate([0,0,-2]) carrier();
-else if (part=="leg") translate([0,0,-2]) rotate([90,0,0]) leg();
-else if (part=="foot") translate([0,0,foot_radius]) foot();
-else assert(false,"Unknown part selection");
-'''
-
-
-def export_cad(cfg, output=ROOT / "cad" / "robot.scad"):
+    text = "// Generated dimensions from robot.json. Edit geometry in robot.scad.\n"
+    text += "\n".join(f"{key} = {value};" for key, value in parameters.items()) + "\n"
     output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(cad_source(cfg), encoding="utf-8")
+    output.write_text(text, encoding="utf-8")
     return output
 
 
@@ -288,7 +276,7 @@ def export_stl(scad, executable=None):
             executable = str(candidate)
     if not executable:
         raise RuntimeError("STL export needs OpenSCAD. Install it or pass --openscad PATH.")
-    for part in ("deck", "carrier", "leg", "foot"):
+    for part in CAD_PARTS:
         destination = scad.with_name(f"{part}.stl")
         subprocess.run([str(executable), "-o", str(destination), "-D", f'part="{part}"', str(scad)], check=True)
         print(f"Exported {destination}")
@@ -301,8 +289,7 @@ if __name__ == "__main__":
     parser.add_argument("--openscad", type=Path, help="Optional path to OpenSCAD executable")
     args = parser.parse_args()
     config = load_config(args.config)
-    print(f"Built {build(config)}")
-    scad = export_cad(config)
-    print(f"Generated prototype CAD: {scad}")
+    print(f"Updated CAD dimensions: {export_cad(config)}")
     if args.stl:
-        export_stl(scad, args.openscad)
+        export_stl(CAD_DIR / "robot.scad", args.openscad)
+    print(f"Built {build(config)}")

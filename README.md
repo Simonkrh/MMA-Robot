@@ -1,7 +1,5 @@
 # MMA robot
 
-A compact four-legged robot simulation with eight servos.
-
 ## Setup
 
 Install Python 3.11 or 3.12. Open PowerShell in this folder and run:
@@ -19,12 +17,17 @@ python -m venv .venv
 
 Or press **Ctrl+Shift+B** in VS Code.
 
-Click the simulation window: **W** walks, **S** stands, **R** resets, **Space** pauses, and **Esc** closes.
+Click the simulation window: **Up arrow** walks, **Down arrow** stands, **R** resets, **C** toggles collision shapes, **Space** pauses, and **Esc** closes.
 
-To start walking immediately:
 
-```powershell
-.\.venv\Scripts\python.exe run_robot.py --walk
-```
 
 Edit `robot.json` to change the robot settings. See [design notes](docs/DESIGN.md) for CAD and hardware details.
+
+The simulation displays the parts from `cad/*.stl`. Replace a part and restart to see it.
+To edit the supplied CAD, change `cad/robot.scad`, then export with OpenSCAD installed:
+
+```powershell
+.\.venv\Scripts\python.exe build_robot.py --stl
+```
+
+This also updates `models/robot.xml`. STL changes update appearance; physics dimensions and masses still need matching settings.

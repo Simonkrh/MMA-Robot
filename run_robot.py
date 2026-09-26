@@ -13,14 +13,14 @@ import zlib
 import mujoco
 import numpy as np
 
-from build_robot import CONFIG, LEGS, ROOT, load_config, model_xml
+from build_robot import CAD_DIR, CONFIG, LEGS, ROOT, load_config, mesh_assets, model_xml
 
 
 class Robot:
-    def __init__(self, cfg=None):
+    def __init__(self, cfg=None, cad_dir=CAD_DIR):
         self.cfg = load_config() if cfg is None else cfg
         # Build in memory every launch, so stale generated XML cannot override JSON.
-        self.model = mujoco.MjModel.from_xml_string(model_xml(self.cfg))
+        self.model = mujoco.MjModel.from_xml_string(model_xml(self.cfg), assets=mesh_assets(self.cfg, cad_dir))
         self.data = mujoco.MjData(self.model)
         self.jids = np.array([self.model.joint(f"{name}_{kind}").id
                               for name, _, _ in LEGS for kind in ("swing", "lift")])
@@ -176,6 +176,7 @@ def check(cfg):
     if cases[1]["forward_m"] < .03:
         failures.append("Walking did not advance at least 30 mm in 20 s")
     report = {"passed": not failures, "failures": failures, "servo_count": robot.model.nu,
+              "cad_mesh_count": robot.model.nmesh,
               "estimated_mass_kg": float(robot.model.body_mass.sum()),
               "self_collisions": sorted(collisions), "trials": cases}
     path = ROOT / "results" / "check.json"
@@ -190,7 +191,9 @@ def snapshot(robot, path):
     camera.lookat[:] = [0, 0, .04]
     camera.distance, camera.azimuth, camera.elevation = .62, 135, -28
     with mujoco.Renderer(robot.model, height=900, width=1200) as renderer:
-        renderer.update_scene(robot.data, camera=camera)
+        options = mujoco.MjvOption()
+        options.geomgroup[3] = 0
+        renderer.update_scene(robot.data, camera=camera, scene_option=options)
         pixels = renderer.render()
     # Standard-library PNG writer keeps rendering free of additional dependencies.
     def chunk(kind, data):
@@ -205,11 +208,15 @@ def snapshot(robot, path):
 
 
 def interactive(robot):
+    import glfw
     import mujoco.viewer
     commands = SimpleQueue()
-    print("W: walk | S: stand | R: reset | Space: pause | Esc: close")
+    # Passive-viewer callbacks do not consume MuJoCo's built-in shortcuts.
+    # Up/Down have no simulation or rendering binding in MuJoCo 3.3.7.
+    print("Up: walk | Down: stand | R: reset | C: collision overlay | Space: pause | Esc: close")
     paused = False
     with mujoco.viewer.launch_passive(robot.model, robot.data, key_callback=commands.put) as viewer:
+        viewer.opt.geomgroup[3] = 0
         viewer.cam.distance, viewer.cam.azimuth, viewer.cam.elevation = .62, 135, -28
         substeps = max(1, round(1 / (60 * robot.model.opt.timestep)))
         frame_seconds = substeps * robot.model.opt.timestep
@@ -217,12 +224,15 @@ def interactive(robot):
             began = time.perf_counter()
             while not commands.empty():
                 key = commands.get()
-                if key == ord("W"):
+                if key == glfw.KEY_UP:
                     robot.set_mode("walk")
-                elif key == ord("S"):
+                elif key == glfw.KEY_DOWN:
                     robot.set_mode("stand")
                 elif key == ord("R"):
                     robot.reset()
+                elif key == ord("C"):
+                    with viewer.lock():
+                        viewer.opt.geomgroup[3] = 1 - viewer.opt.geomgroup[3]
                 elif key == ord(" "):
                     paused = not paused
                 elif key == 256:
