@@ -1,4 +1,4 @@
-"""Build the compact quadruped from robot.json. No original CAD files required."""
+"""Build the compact quadruped from robot.json and the STL files in cad/."""
 from __future__ import annotations
 
 import argparse
@@ -6,9 +6,7 @@ import json
 import math
 from pathlib import Path
 import re
-import shutil
 import struct
-import subprocess
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -24,7 +22,7 @@ def read_stl(path):
     """Read ASCII or binary STL triangles in the source file's units."""
     path = Path(path)
     if not path.is_file():
-        raise FileNotFoundError(f"Missing CAD mesh: {path}. Restore it or export with build_robot.py --stl.")
+        raise FileNotFoundError(f"Missing CAD mesh: {path}. Restore it or export a replacement STL from your CAD editor in millimetres.")
     data = path.read_bytes()
     count = struct.unpack_from("<I", data, 80)[0] if len(data) >= 84 else 0
     if count and len(data) == 84 + 50 * count:
@@ -58,7 +56,7 @@ def mesh_assets(cfg, cad_dir=CAD_DIR):
     """Undo print-bed transforms; return assembly-local, millimetre binary meshes.
 
     Source STLs are never modified. Assets are freshly read on each invocation.
-    These inverses match the per-part export transforms at the end of robot.scad.
+    These inverses match the supplied STLs; see docs/DESIGN.md for export coordinates.
     """
     assets = {}
     for part in CAD_PARTS:
@@ -250,46 +248,9 @@ def build(cfg=None, output=ROOT / "models" / "robot.xml", cad_dir=CAD_DIR):
     return output
 
 
-def export_cad(cfg, output=CAD_DIR / "parameters.scad"):
-    """Refresh shared dimensions only; robot.scad is a user-editable source file."""
-    s, b, l = (cfg[k] for k in ("servo", "body", "leg"))
-    parameters = {
-        "sl": s["length_mm"], "sw": s["width_mm"], "sh": s["height_mm"],
-        "shaft_offset": s["shaft_offset_mm"], "bl": b["length_mm"], "bw": b["width_mm"],
-        "plate": b["plate_mm"], "hx": l["hip_x_mm"], "hy": l["hip_y_mm"],
-        "reach": l["reach_mm"], "rise": l["lift_height_mm"], "leg_length": l["length_mm"],
-        "stance": l["stance_deg"], "foot_radius": l["foot_radius_mm"],
-    }
-    text = "// Generated dimensions from robot.json. Edit geometry in robot.scad.\n"
-    text += "\n".join(f"{key} = {value};" for key, value in parameters.items()) + "\n"
-    output = Path(output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(text, encoding="utf-8")
-    return output
-
-
-def export_stl(scad, executable=None):
-    executable = executable or shutil.which("openscad")
-    if not executable:
-        candidate = Path("C:/Program Files/OpenSCAD/openscad.com")
-        if candidate.exists():
-            executable = str(candidate)
-    if not executable:
-        raise RuntimeError("STL export needs OpenSCAD. Install it or pass --openscad PATH.")
-    for part in CAD_PARTS:
-        destination = scad.with_name(f"{part}.stl")
-        subprocess.run([str(executable), "-o", str(destination), "-D", f'part="{part}"', str(scad)], check=True)
-        print(f"Exported {destination}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=CONFIG)
-    parser.add_argument("--stl", action="store_true", help="Also export prototype STLs using OpenSCAD")
-    parser.add_argument("--openscad", type=Path, help="Optional path to OpenSCAD executable")
     args = parser.parse_args()
     config = load_config(args.config)
-    print(f"Updated CAD dimensions: {export_cad(config)}")
-    if args.stl:
-        export_stl(CAD_DIR / "robot.scad", args.openscad)
     print(f"Built {build(config)}")

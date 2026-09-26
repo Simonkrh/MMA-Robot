@@ -24,10 +24,10 @@ Click the simulation window: **Up arrow** walks, **Down arrow** stands, **R** re
 Edit `robot.json` to change the robot settings. See [design notes](docs/DESIGN.md) for CAD and hardware details.
 
 The simulation displays the parts from `cad/*.stl`. Replace a part and restart to see it.
-To edit the supplied CAD, change `cad/robot.scad`, then export with OpenSCAD installed:
+Edit parts and export replacement STLs in millimetres. Preserve the filenames and coordinate conventions described in the design notes. To refresh the saved simulation XML and its mesh assets, run:
 
 ```powershell
-.\.venv\Scripts\python.exe build_robot.py --stl
+.\.venv\Scripts\python.exe build_robot.py
 ```
 
-This also updates `models/robot.xml`. STL changes update appearance; physics dimensions and masses still need matching settings.
+This updates `models/robot.xml` and `models/meshes/` without changing the source STLs. STL changes update appearance; physics dimensions and masses still need matching settings.

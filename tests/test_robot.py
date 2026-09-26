@@ -10,7 +10,7 @@ import unittest
 import mujoco
 import numpy as np
 
-from build_robot import CAD_PARTS, LEGS, ROOT, binary_stl, build, export_cad, load_config, model_xml, read_stl
+from build_robot import CAD_PARTS, LEGS, ROOT, binary_stl, build, load_config, model_xml, read_stl
 from run_robot import Robot
 
 
@@ -118,13 +118,6 @@ class RobotTests(unittest.TestCase):
             self.assertEqual(model.nu, 8)
             np.testing.assert_allclose(model.body_inertia, Robot(cfg).model.body_inertia)
             self.assertNotIn(str(ROOT), output.read_text(encoding="utf-8"))
-
-    def test_refreshing_dimensions_preserves_edited_cad_source(self):
-        with tempfile.TemporaryDirectory() as folder:
-            source = Path(folder) / "robot.scad"
-            source.write_text("// My custom leg design\n", encoding="utf-8")
-            export_cad(load_config(), Path(folder) / "parameters.scad")
-            self.assertEqual(source.read_text(encoding="utf-8"), "// My custom leg design\n")
 
     def test_missing_or_invalid_mesh_has_actionable_error(self):
         with tempfile.TemporaryDirectory() as folder:
