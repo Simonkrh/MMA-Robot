@@ -2,7 +2,7 @@
 
 ## Setup
 
-Install Python 3.11 or 3.12. Open PowerShell in this folder and run:
+Install Python 3.11 or 3.12. Run:
 
 ```powershell
 python -m venv .venv
@@ -14,8 +14,6 @@ python -m venv .venv
 ```powershell
 .\.venv\Scripts\python.exe run_robot.py
 ```
-
-Or press **Ctrl+Shift+B** in VS Code.
 
 Click the simulation window: **Up arrow** walks, **Down arrow** stands, **R** resets, **C** toggles collision shapes, **Space** pauses, and **Esc** closes.
 
